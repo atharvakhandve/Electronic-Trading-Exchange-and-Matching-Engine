@@ -7,21 +7,17 @@ from typing import Dict, Set, Optional
 from fastapi import WebSocket
 
 
-PUBLIC_EVENT_TYPES = {"BookL1", "BookSnapshot", "TradeExecuted"}
-PRIVATE_EVENT_TYPES = {"OrderAccepted", "OrderUpdate"}
-
-
 @dataclass
 class ClientSubscription:
     websocket: WebSocket
-    channels: Set[str] = field(default_factory=set)   # l1, book, trades, orders
+    channels: Set[str] = field(default_factory=set)
     symbol: Optional[str] = None
     user_id: Optional[str] = None
 
 
 class WebSocketPublisher:
     """
-    WebSocket publisher with basic subscriptions.
+    Channel-based publisher.
 
     Supported channels:
     - l1
@@ -29,6 +25,7 @@ class WebSocketPublisher:
     - trades
     - orders
     """
+
     def __init__(self) -> None:
         self.clients: Dict[WebSocket, ClientSubscription] = {}
 
@@ -57,10 +54,10 @@ class WebSocketPublisher:
 
     def _should_send(self, sub: ClientSubscription, event: Dict) -> bool:
         event_type = event.get("type")
-        symbol = event.get("symbol")
+        event_symbol = event.get("symbol")
         event_user_id = event.get("user_id")
 
-        if sub.symbol and symbol and sub.symbol != symbol:
+        if sub.symbol and event_symbol and sub.symbol != event_symbol:
             return False
 
         if event_type == "BookL1":
@@ -81,7 +78,7 @@ class WebSocketPublisher:
         dead = []
         message = json.dumps(event)
 
-        for ws, sub in self.clients.items():
+        for ws, sub in list(self.clients.items()):
             if not self._should_send(sub, event):
                 continue
             try:

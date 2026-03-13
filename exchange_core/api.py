@@ -6,11 +6,13 @@ from contextlib import asynccontextmanager
 from typing import Optional, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from engine import Sequencer, MatchingEngineService, Command
 from publisher import WebSocketPublisher, event_fanout_loop
-from models import Order, Side, OrderType
+from models import Order, Side, OrderType, now_ms
+from docker.repository import insert_command
 
 
 sequencer = Sequencer()
@@ -20,6 +22,10 @@ publisher = WebSocketPublisher()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Replay state before starting live processing
+    await engine.replay_from_db()
+    sequencer.set_seq(engine.seq_applied)
+
     engine_task = asyncio.create_task(engine.run())
     fanout_task = asyncio.create_task(event_fanout_loop(engine, publisher))
     yield
@@ -28,8 +34,20 @@ async def lifespan(app: FastAPI):
     fanout_task.cancel()
 
 
-app = FastAPI(title="Electronic Trading Exchange - Sprint 3", lifespan=lifespan)
-
+app = FastAPI(title="Electronic Trading Exchange - Replay Enabled", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "null"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class CreateOrderRequest(BaseModel):
     user_id: str
@@ -39,13 +57,6 @@ class CreateOrderRequest(BaseModel):
     qty: int = Field(gt=0)
     price_cents: Optional[int] = None
     client_order_id: Optional[str] = None
-
-
-class SubscriptionMessage(BaseModel):
-    action: str  # subscribe | unsubscribe
-    channels: List[str]
-    symbol: Optional[str] = None
-    user_id: Optional[str] = None
 
 
 @app.get("/health")
@@ -76,6 +87,21 @@ async def create_order(req: CreateOrderRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
     seq = await sequencer.next_seq()
+
+    payload = {
+        "order_id": order.order_id,
+        "client_order_id": order.client_order_id,
+        "user_id": order.user_id,
+        "symbol": order.symbol,
+        "side": order.side.value,
+        "type": order.type.value,
+        "qty": order.qty,
+        "price_cents": order.price_cents,
+        "created_ms": order.created_ms
+    }
+
+    insert_command(seq, "NEW_ORDER", payload, order.created_ms)
+
     cmd = Command(seq=seq, type="NEW_ORDER", payload={"order": order})
     await engine.submit(cmd)
 
@@ -92,10 +118,14 @@ async def create_order(req: CreateOrderRequest):
 
 @app.delete("/orders/{order_id}")
 async def cancel_order(order_id: str):
-    if order_id not in engine.orders:
-        raise HTTPException(status_code=404, detail="order not found")
-
     seq = await sequencer.next_seq()
+
+    payload = {
+        "order_id": order_id
+    }
+
+    insert_command(seq, "CANCEL_ORDER", payload, now_ms())
+
     cmd = Command(seq=seq, type="CANCEL_ORDER", payload={"order_id": order_id})
     await engine.submit(cmd)
 
@@ -185,13 +215,16 @@ async def list_orders(user_id: Optional[str] = None, status: Optional[str] = Non
 async def stream(ws: WebSocket):
     await publisher.connect(ws)
     try:
-        # default empty subscription until client sends subscribe message
         while True:
             raw = await ws.receive_text()
+
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
-                await ws.send_text(json.dumps({"type": "Error", "message": "invalid JSON"}))
+                await ws.send_text(json.dumps({
+                    "type": "Error",
+                    "message": "invalid JSON"
+                }))
                 continue
 
             action = payload.get("action")
@@ -200,24 +233,37 @@ async def stream(ws: WebSocket):
             user_id = payload.get("user_id")
 
             if action not in {"subscribe", "unsubscribe"}:
-                await ws.send_text(json.dumps({"type": "Error", "message": "action must be subscribe or unsubscribe"}))
+                await ws.send_text(json.dumps({
+                    "type": "Error",
+                    "message": "action must be subscribe or unsubscribe"
+                }))
                 continue
 
             if action == "subscribe":
-                publisher.update_subscription(ws, channels=channels, symbol=symbol, user_id=user_id)
+                publisher.update_subscription(
+                    ws,
+                    channels=channels,
+                    symbol=symbol,
+                    user_id=user_id
+                )
                 await ws.send_text(json.dumps({
                     "type": "Subscribed",
                     "channels": list(channels),
                     "symbol": symbol,
-                    "user_id": user_id,
+                    "user_id": user_id
                 }))
             else:
-                publisher.update_subscription(ws, channels=set(), symbol=symbol, user_id=user_id)
+                publisher.update_subscription(
+                    ws,
+                    channels=set(),
+                    symbol=symbol,
+                    user_id=user_id
+                )
                 await ws.send_text(json.dumps({
                     "type": "Unsubscribed",
                     "channels": [],
                     "symbol": symbol,
-                    "user_id": user_id,
+                    "user_id": user_id
                 }))
 
     except WebSocketDisconnect:
