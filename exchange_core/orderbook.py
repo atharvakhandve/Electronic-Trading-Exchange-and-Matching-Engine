@@ -18,16 +18,9 @@ class OrderBook:
     """
     In-memory order book.
 
-    Data structures:
-      - orders: order_id -> Order
-      - bids: price -> deque(order_id)
-      - asks: price -> deque(order_id)
-      - bid_prices: sorted ascending list; best bid = last
-      - ask_prices: sorted ascending list; best ask = first
-
-    Cancellation / fill removal is lazy:
-      - inactive or filled orders remain in deque temporarily
-      - cleaned up when traversed
+    - bids: highest price has priority
+    - asks: lowest price has priority
+    - same price level uses FIFO by deque
     """
 
     def __init__(self, symbol: str):
@@ -37,12 +30,10 @@ class OrderBook:
         self.bids: Dict[int, Deque[str]] = {}
         self.asks: Dict[int, Deque[str]] = {}
 
-        self.bid_prices: List[int] = []
-        self.ask_prices: List[int] = []
+        self.bid_prices: List[int] = []   # ascending, best is last
+        self.ask_prices: List[int] = []   # ascending, best is first
 
-    # -------------------------
-    # Internal helpers
-    # -------------------------
+    # ---------------- internal helpers ----------------
 
     def _ensure_price_level(self, side: Side, price_cents: int) -> None:
         if side == Side.BUY:
@@ -92,18 +83,15 @@ class OrderBook:
         q = levels.get(price_cents)
         if not q:
             return None
-        oid = q[0]
-        return self.orders.get(oid)
+        return self.orders.get(q[0])
 
-    # -------------------------
-    # Public operations
-    # -------------------------
+    # ---------------- public methods ----------------
 
     def add_resting_limit(self, order: Order) -> None:
         if order.symbol != self.symbol:
-            raise ValueError("Order symbol does not match order book symbol")
+            raise ValueError("Order symbol does not match book symbol")
         if order.price_cents is None:
-            raise ValueError("Resting order must have price_cents")
+            raise ValueError("Resting LIMIT order must have price_cents")
 
         self.orders[order.order_id] = order
         self._ensure_price_level(order.side, order.price_cents)
@@ -162,7 +150,6 @@ class OrderBook:
         bids_out: List[Tuple[int, int]] = []
         asks_out: List[Tuple[int, int]] = []
 
-        # Highest bid first
         for price in reversed(self.bid_prices[-depth:]):
             total_qty = 0
             for oid in self.bids.get(price, []):
@@ -172,7 +159,6 @@ class OrderBook:
             if total_qty > 0:
                 bids_out.append((price, total_qty))
 
-        # Lowest ask first
         for price in self.ask_prices[:depth]:
             total_qty = 0
             for oid in self.asks.get(price, []):

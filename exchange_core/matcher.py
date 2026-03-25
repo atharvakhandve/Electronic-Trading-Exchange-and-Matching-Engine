@@ -15,17 +15,14 @@ def _reject(order: Order, reason: str) -> List[Trade]:
 
 def match_order(book: OrderBook, taker: Order) -> List[Trade]:
     """
-    Match an incoming taker order against the order book.
-
-    Rules:
-      - LIMIT BUY crosses if buy_price >= best_ask
-      - LIMIT SELL crosses if sell_price <= best_bid
-      - MARKET orders cross as long as opposite liquidity exists
-      - Trade executes at maker (resting) order price
-      - FIFO enforced by deque order at each price level
-      - Partial fills supported
-      - Unfilled LIMIT remainder rests in book
-      - Unfilled MARKET remainder is rejected
+    Matching rules:
+    - LIMIT BUY crosses if buy_price >= best_ask
+    - LIMIT SELL crosses if sell_price <= best_bid
+    - MARKET orders cross while opposite liquidity exists
+    - trade price = maker (resting) order price
+    - FIFO at same price
+    - LIMIT remainder rests
+    - MARKET remainder is canceled/rejected
     """
     trades: List[Trade] = []
 
@@ -38,7 +35,6 @@ def match_order(book: OrderBook, taker: Order) -> List[Trade]:
         best_bid = book.best_bid()
         best_ask = book.best_ask()
 
-        # Determine whether taker can cross
         can_cross = False
         if taker.type == OrderType.MARKET:
             if taker.side == Side.BUY:
@@ -46,7 +42,6 @@ def match_order(book: OrderBook, taker: Order) -> List[Trade]:
             else:
                 can_cross = best_bid is not None
         else:
-            # LIMIT
             if taker.side == Side.BUY:
                 can_cross = best_ask is not None and taker.price_cents >= best_ask
             else:
@@ -59,7 +54,6 @@ def match_order(book: OrderBook, taker: Order) -> List[Trade]:
         if maker is None:
             break
 
-        # Maker price is execution price
         trade_price = maker.price_cents
         if trade_price is None:
             return _reject(taker, "internal error: maker without price")
@@ -81,26 +75,22 @@ def match_order(book: OrderBook, taker: Order) -> List[Trade]:
             )
         )
 
-        # Update maker status
         if maker.remaining_qty == 0:
             maker.status = OrderStatus.FILLED
             maker.active = False
         else:
             maker.status = OrderStatus.PARTIAL
 
-        # Update taker status
         if taker.remaining_qty == 0:
             taker.status = OrderStatus.FILLED
             taker.active = False
         else:
             taker.status = OrderStatus.PARTIAL
 
-    # Handle remainder
     if taker.remaining_qty > 0:
         if taker.type == OrderType.LIMIT:
             book.add_resting_limit(taker)
         else:
-            # MARKET order cannot rest in the book
             if taker.remaining_qty == taker.qty:
                 return _reject(taker, "market order could not be filled: no liquidity")
             taker.status = OrderStatus.PARTIAL
