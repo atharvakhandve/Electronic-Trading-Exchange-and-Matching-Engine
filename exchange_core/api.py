@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, APIRouter, Query
 from fastapi.middleware.cors import CORSMiddleware
-from docker import repository 
+from docker import repository
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from docker.db import get_connection, put_connection
@@ -347,8 +353,11 @@ def get_candles(
     interval: str = Query("1m"),
     limit: int = Query(100)
 ):
+    import time as _time
     bucket_map = {"1m": 60000, "5m": 300000, "15m": 900000, "30m": 1800000, "1h": 3600000}
     bucket_size = bucket_map.get(interval, 60000)
+    # Look back far enough to cover `limit` candles plus a small buffer
+    cutoff_ms = int(_time.time() * 1000) - bucket_size * (limit + 10)
 
     conn = get_connection()
     cur = conn.cursor()
@@ -357,9 +366,8 @@ def get_candles(
         WITH recent_trades AS (
             SELECT *
             FROM trades
-            WHERE symbol = %s
-            ORDER BY ts_ms DESC
-            LIMIT 5000
+            WHERE symbol = %s AND ts_ms >= %s
+            ORDER BY ts_ms ASC
         ),
         bucketed AS (
             SELECT
@@ -370,6 +378,19 @@ def get_candles(
                 floor(ts_ms::numeric / {bucket_size}) * {bucket_size} AS bucket_ms
             FROM recent_trades
         ),
+        bucket_median AS (
+            SELECT
+                bucket_ms,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY price_cents) AS median_price
+            FROM bucketed
+            GROUP BY bucket_ms
+        ),
+        filtered AS (
+            SELECT b.*
+            FROM bucketed b
+            JOIN bucket_median m ON b.bucket_ms = m.bucket_ms
+            WHERE b.price_cents BETWEEN m.median_price * 0.95 AND m.median_price * 1.05
+        ),
         ranked AS (
             SELECT
                 bucket_ms,
@@ -377,14 +398,15 @@ def get_candles(
                 ts_ms,
                 ROW_NUMBER() OVER (PARTITION BY bucket_ms ORDER BY ts_ms ASC) AS rn_open,
                 ROW_NUMBER() OVER (PARTITION BY bucket_ms ORDER BY ts_ms DESC) AS rn_close
-            FROM bucketed
+            FROM filtered
         ),
         agg AS (
             SELECT
                 bucket_ms,
                 MAX(price_cents) AS high,
-                MIN(price_cents) AS low
-            FROM bucketed
+                MIN(price_cents) AS low,
+                SUM(qty) AS volume
+            FROM filtered
             GROUP BY bucket_ms
         ),
         open_prices AS (
@@ -402,7 +424,8 @@ def get_candles(
             o.open,
             a.high,
             a.low,
-            c.close
+            c.close,
+            a.volume
         FROM agg a
         JOIN open_prices o ON a.bucket_ms = o.bucket_ms
         JOIN close_prices c ON a.bucket_ms = c.bucket_ms
@@ -410,7 +433,7 @@ def get_candles(
         LIMIT %s
     """
 
-    cur.execute(query, (symbol, limit))
+    cur.execute(query, (symbol, cutoff_ms, limit))
     rows = cur.fetchall()
 
     cur.close()
@@ -425,7 +448,166 @@ def get_candles(
             "high": float(row[2]) / 100,
             "low": float(row[3]) / 100,
             "close": float(row[4]) / 100,
+            "volume": int(row[5]),
         }
         for row in rows
     ]
 
+
+# ── News + Sentiment (FinBERT via HuggingFace Inference API) ─────────────────
+
+_news_cache: dict = {}   # symbol -> {"data": ..., "ts": float}
+_NEWS_TTL = 300          # 5 minutes
+
+NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
+
+# Bullish / bearish keyword sets for financial VADER boosting
+_BULLISH_WORDS = {
+    "surge", "surges", "surged", "rally", "rallies", "rallied", "gain", "gains",
+    "gained", "rise", "rises", "rose", "soar", "soars", "soared", "beat", "beats",
+    "record", "high", "upgrade", "upgrades", "upgraded", "buy", "outperform",
+    "profit", "profits", "growth", "revenue", "breakthrough", "positive", "strong",
+    "bullish", "boom", "booming", "expand", "expands", "expansion",
+}
+_BEARISH_WORDS = {
+    "drop", "drops", "dropped", "fall", "falls", "fell", "decline", "declines",
+    "declined", "plunge", "plunges", "plunged", "loss", "losses", "miss", "misses",
+    "missed", "cut", "cuts", "downgrade", "downgrades", "downgraded", "sell",
+    "underperform", "weak", "warning", "lawsuit", "recall", "bearish", "crash",
+    "crashes", "crashed", "slump", "slumps", "slumped", "layoff", "layoffs",
+    "fine", "penalty", "investigation", "risk", "debt", "bankrupt",
+}
+
+
+def _vader_sentiment(headline: str) -> tuple[str, float]:
+    """Score a headline with VADER + financial keyword boost."""
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+    analyzer = SentimentIntensityAnalyzer()
+
+    scores = analyzer.polarity_scores(headline)
+    compound = scores["compound"]
+
+    # Financial keyword boost: shift compound score by ±0.15 per matched word
+    words = set(headline.lower().split())
+    bull_hits = len(words & _BULLISH_WORDS)
+    bear_hits = len(words & _BEARISH_WORDS)
+    compound = max(-1.0, min(1.0, compound + 0.15 * bull_hits - 0.15 * bear_hits))
+
+    if compound >= 0.05:
+        label, confidence = "bullish", round((compound + 1) / 2, 3)
+    elif compound <= -0.05:
+        label, confidence = "bearish", round((1 - compound) / 2, 3)
+    else:
+        label, confidence = "neutral", round(1 - abs(compound) * 10, 3)
+
+    return label, max(0.5, confidence)
+
+
+def _majority_sentiment(labels: list[str]) -> tuple[str, float]:
+    counts = {"bullish": 0, "neutral": 0, "bearish": 0}
+    for lbl in labels:
+        counts[lbl] = counts.get(lbl, 0) + 1
+    total = len(labels) or 1
+    overall = max(counts, key=counts.__getitem__)
+    return overall, round(counts[overall] / total, 3)
+
+
+@app.get("/news/{symbol}")
+async def get_news_sentiment(symbol: str):
+    symbol = symbol.upper()
+
+    cached = _news_cache.get(symbol)
+    if cached and (time.time() - cached["ts"]) < _NEWS_TTL:
+        return cached["data"]
+
+    if not NEWSAPI_KEY:
+        raise HTTPException(status_code=503, detail="NEWSAPI_KEY not configured")
+
+    # 1. Fetch headlines
+    async with httpx.AsyncClient(timeout=15) as client:
+        news_resp = await client.get(
+            "https://newsapi.org/v2/everything",
+            params={
+                "q": symbol,
+                "language": "en",
+                "sortBy": "publishedAt",
+                "pageSize": 10,
+                "apiKey": NEWSAPI_KEY,
+            },
+        )
+
+    if news_resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"NewsAPI error: {news_resp.text}")
+
+    articles_raw = news_resp.json().get("articles", [])
+    articles = [
+        {
+            "title": a.get("title", ""),
+            "source": a.get("source", {}).get("name", ""),
+            "url": a.get("url", ""),
+            "published_at": a.get("publishedAt", ""),
+        }
+        for a in articles_raw
+        if a.get("title") and "[Removed]" not in a.get("title", "")
+    ][:10]
+
+    if not articles:
+        result = {"symbol": symbol, "articles": [], "sentiment": None}
+        _news_cache[symbol] = {"data": result, "ts": time.time()}
+        return result
+
+    # 2. Score each headline locally with VADER
+    per_labels = []
+    for article in articles:
+        label, confidence = _vader_sentiment(article["title"])
+        article["sentiment"] = label
+        article["sentiment_confidence"] = confidence
+        per_labels.append(label)
+
+    # 3. Aggregate
+    overall, overall_confidence = _majority_sentiment(per_labels)
+    bull = per_labels.count("bullish")
+    bear = per_labels.count("bearish")
+    neut = per_labels.count("neutral")
+    total = len(articles)
+
+    # Build a brief analyst-style summary from the scored headlines
+    bullish_titles  = [a["title"] for a, l in zip(articles, per_labels) if l == "bullish"]
+    bearish_titles  = [a["title"] for a, l in zip(articles, per_labels) if l == "bearish"]
+
+    if overall == "bullish":
+        tone = "positive"
+        direction = f"Sentiment is leaning bullish ({bull}/{total} headlines positive)."
+    elif overall == "bearish":
+        tone = "negative"
+        direction = f"Sentiment is leaning bearish ({bear}/{total} headlines negative)."
+    else:
+        tone = "mixed"
+        direction = f"Sentiment is largely neutral ({neut}/{total} headlines neutral)."
+
+    highlights = []
+    if bullish_titles:
+        # Truncate headline to keep the summary readable
+        h = bullish_titles[0][:80] + ("…" if len(bullish_titles[0]) > 80 else "")
+        highlights.append(f"Bullish signal: \"{h}\"")
+    if bearish_titles:
+        h = bearish_titles[0][:80] + ("…" if len(bearish_titles[0]) > 80 else "")
+        highlights.append(f"Bearish signal: \"{h}\"")
+
+    summary = f"{direction} " + " ".join(highlights)
+    if not highlights:
+        summary += f" No strongly directional headlines detected for {symbol}."
+
+    result = {
+        "symbol": symbol,
+        "articles": articles,
+        "sentiment": {
+            "overall": overall,
+            "confidence": overall_confidence,
+            "summary": summary.strip(),
+            "counts": {"bullish": bull, "bearish": bear, "neutral": neut},
+        },
+    }
+
+    _news_cache[symbol] = {"data": result, "ts": time.time()}
+    return result
