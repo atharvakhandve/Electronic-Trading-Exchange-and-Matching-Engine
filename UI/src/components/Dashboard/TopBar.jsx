@@ -77,11 +77,9 @@ const TopBar = ({ appName = "Trading Exchange", profileName = "T", onMenuClick }
 
         {/* Left */}
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          {isMobile && (
-            <IconButton onClick={onMenuClick} sx={{ color: c.t1 }}>
-              <MenuIcon />
-            </IconButton>
-          )}
+          <IconButton onClick={onMenuClick} sx={{ color: c.t1 }}>
+            <MenuIcon />
+          </IconButton>
           <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: "0.5px", color: c.t1, whiteSpace: "nowrap" }}>
             {appName}
           </Typography>

@@ -7,15 +7,15 @@ import SwapHorizOutlinedIcon from "@mui/icons-material/SwapHorizOutlined";
 import ReceiptLongOutlinedIcon from "@mui/icons-material/ReceiptLongOutlined";
 import TerminalOutlinedIcon from "@mui/icons-material/TerminalOutlined";
 import LogoutOutlinedIcon from "@mui/icons-material/LogoutOutlined";
+import AccountBalanceWalletOutlinedIcon from "@mui/icons-material/AccountBalanceWalletOutlined";
+import PieChartOutlineOutlinedIcon from "@mui/icons-material/PieChartOutlineOutlined";
 import { useNavigate } from "react-router-dom";
 import useColors from "../../theme/useColors.js";
 
 const menuItems = [
   { label: "Dashboard",   icon: <DashboardOutlinedIcon /> },
-  { label: "Place Order", icon: <AddShoppingCartOutlinedIcon /> },
-  { label: "Order Book",  icon: <MenuBookOutlinedIcon /> },
-  { label: "Trades",      icon: <SwapHorizOutlinedIcon /> },
-  { label: "Orders",      icon: <ReceiptLongOutlinedIcon /> },
+  { label: "Portfolio",   icon: <PieChartOutlineOutlinedIcon /> },
+  { label: "Wallet",      icon: <AccountBalanceWalletOutlinedIcon /> },
   { label: "Logs",        icon: <TerminalOutlinedIcon /> },
 ];
 
