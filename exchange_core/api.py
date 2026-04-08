@@ -8,7 +8,9 @@ from contextlib import asynccontextmanager
 from typing import Optional, List
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, APIRouter, Query
@@ -156,6 +158,25 @@ async def create_order(req: CreateOrderRequest):
                 status_code=400,
                 detail=f"Not enough shares to sell. Owned: {owned_qty}, Trying to sell: {req.qty}"
             )
+
+    # block BUY if wallet balance is insufficient
+    if req.side.value == "BUY":
+        if req.type.value == "LIMIT" and req.price_cents:
+            required_cents = req.qty * req.price_cents
+        else:
+            # MARKET order — estimate from best ask
+            snap = engine.book.snapshot_l2(1)
+            best_ask_cents = snap["asks"][0][0] if snap.get("asks") else 0
+            required_cents = req.qty * best_ask_cents if best_ask_cents else 0
+
+        if required_cents > 0:
+            wallet = repository.get_wallet(int(req.user_id))
+            balance = wallet["balance_cents"]
+            if balance < required_cents:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient funds: need ${required_cents/100:.2f}, available ${balance/100:.2f}"
+                )
 
     existing = sequencer.get_idempotent_result(req.user_id, req.client_order_id)
     if existing:
@@ -459,7 +480,8 @@ def get_candles(
 _news_cache: dict = {}   # symbol -> {"data": ..., "ts": float}
 _NEWS_TTL = 300          # 5 minutes
 
-NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
+HF_API_KEY = os.getenv("HF_API_KEY", "")
 
 # Bullish / bearish keyword sets for financial VADER boosting
 _BULLISH_WORDS = {
@@ -611,3 +633,73 @@ async def get_news_sentiment(symbol: str):
 
     _news_cache[symbol] = {"data": result, "ts": time.time()}
     return result
+
+
+# ── Wallet endpoints ──────────────────────────────────────────────────────────
+
+class DepositRequest(BaseModel):
+    amount_cents: int = Field(gt=0)
+    reference: Optional[str] = None
+
+class WithdrawRequest(BaseModel):
+    amount_cents: int = Field(gt=0)
+    reference: Optional[str] = None
+
+class AddPaymentMethodRequest(BaseModel):
+    method_type: str
+    provider: Optional[str] = None
+    last4: Optional[str] = None
+    bank_name: Optional[str] = None
+    account_mask: Optional[str] = None
+
+
+@app.get("/wallet/{user_id}")
+def get_wallet(user_id: int):
+    return repository.get_wallet(user_id)
+
+
+@app.post("/wallet/{user_id}/deposit")
+def deposit(user_id: int, req: DepositRequest):
+    return repository.wallet_deposit(user_id, req.amount_cents, req.reference)
+
+
+@app.post("/wallet/{user_id}/withdraw")
+def withdraw(user_id: int, req: WithdrawRequest):
+    result = repository.wallet_withdraw(user_id, req.amount_cents, req.reference)
+    if result is None:
+        raise HTTPException(status_code=400, detail="Insufficient funds")
+    return result
+
+
+@app.get("/wallet/{user_id}/transactions")
+def get_transactions(user_id: int, limit: int = 50):
+    return repository.get_wallet_transactions(user_id, limit)
+
+
+@app.get("/wallet/{user_id}/payment-methods")
+def list_payment_methods(user_id: int):
+    return repository.get_payment_methods(user_id)
+
+
+@app.post("/wallet/{user_id}/payment-methods")
+def add_payment_method(user_id: int, req: AddPaymentMethodRequest):
+    return repository.add_payment_method(
+        user_id, req.method_type, req.provider,
+        req.last4, req.bank_name, req.account_mask
+    )
+
+
+@app.delete("/wallet/{user_id}/payment-methods/{pm_id}")
+def remove_payment_method(user_id: int, pm_id: int):
+    deleted = repository.delete_payment_method(user_id, pm_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Payment method not found")
+    return {"message": "deleted"}
+
+
+@app.patch("/wallet/{user_id}/payment-methods/{pm_id}/default")
+def set_default(user_id: int, pm_id: int):
+    ok = repository.set_default_payment_method(user_id, pm_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Payment method not found")
+    return {"message": "default updated"}

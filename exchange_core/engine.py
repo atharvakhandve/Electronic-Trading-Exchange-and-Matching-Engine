@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+log = logging.getLogger(__name__)
 
 from models import Order, Side, OrderType
 from matcher import match_order
@@ -14,6 +17,8 @@ from docker.repository import (
     get_all_commands,
     update_holding_after_buy,
     update_holding_after_sell,
+    wallet_debit,
+    wallet_credit,
 )
 
 
@@ -193,6 +198,28 @@ class MatchingEngineService:
                     t.symbol,
                     t.qty
                 )
+
+                trade_value_cents = t.qty * t.price_cents
+                ref = f"trade:{t.trade_id}"
+                log.info(
+                    "WALLET debit user=%s  credit user=%s  amount_cents=%s  ref=%s",
+                    buyer.user_id, seller.user_id, trade_value_cents, ref
+                )
+                try:
+                    await loop.run_in_executor(
+                        None, wallet_debit, buyer.user_id, trade_value_cents, ref
+                    )
+                    log.info("WALLET debit OK user=%s", buyer.user_id)
+                except Exception as e:
+                    log.error("WALLET debit FAILED user=%s error=%s", buyer.user_id, e)
+
+                try:
+                    await loop.run_in_executor(
+                        None, wallet_credit, seller.user_id, trade_value_cents, ref
+                    )
+                    log.info("WALLET credit OK user=%s", seller.user_id)
+                except Exception as e:
+                    log.error("WALLET credit FAILED user=%s error=%s", seller.user_id, e)
 
             trade_event = {
                 "type": "TradeExecuted",

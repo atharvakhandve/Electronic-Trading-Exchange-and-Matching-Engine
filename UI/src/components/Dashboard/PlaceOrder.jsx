@@ -13,10 +13,15 @@ import {
   DialogContent,
   IconButton,
   useMediaQuery,
+  Snackbar,
+  Alert,
+  Chip,
 } from "@mui/material";
 import { useTheme } from "@mui/material/styles";
 import CloseIcon from "@mui/icons-material/Close";
+import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
 import CandleChart from "./CandleChart";
+import { getWallet } from "../../api/exchangeApi";
 
 const PlaceOrder = () => {
   const [side, setSide] = useState("BUY");
@@ -28,6 +33,8 @@ const PlaceOrder = () => {
   const [book, setBook] = useState({ bids: [], asks: [] });
   const [trades, setTrades] = useState([]);
   const [openModal, setOpenModal] = useState(false);
+  const [walletBalance, setWalletBalance] = useState(null);
+  const [snack, setSnack] = useState({ open: false, message: "", severity: "success" });
 
   const userId = localStorage.getItem("user_id");
 
@@ -85,6 +92,9 @@ const PlaceOrder = () => {
   const openOrderModal = (selectedSide = "BUY") => {
     setSide(selectedSide);
     setOpenModal(true);
+    if (userId) {
+      getWallet(userId).then((w) => setWalletBalance(w.balance_cents / 100)).catch(() => {});
+    }
   };
 
   const closeOrderModal = () => {
@@ -119,19 +129,24 @@ const PlaceOrder = () => {
       console.log("API error response:", data);
 
       if (!res.ok) {
-        const errorMessage =
-          data?.detail?.includes("Not enough shares")
-            ? "You don't have stocks to trade"
-            : data?.detail || data?.message || "Order failed";
-
+        const detail = data?.detail || data?.message || "Order failed";
+        const errorMessage = detail.includes("Not enough shares")
+          ? "Insufficient shares to sell"
+          : detail.includes("Insufficient funds")
+          ? detail
+          : detail;
         throw new Error(errorMessage);
       }
 
-      alert(`${side} order placed successfully`);
+      setSnack({ open: true, message: `${side} order placed successfully!`, severity: "success" });
       setOpenModal(false);
+      // Refresh wallet balance shown outside modal
+      if (userId) getWallet(userId).then((w) => setWalletBalance(w.balance_cents / 100)).catch(() => {});
     } catch (err) {
       console.error(err);
-      alert(err.message || "Failed to place order");
+      const msg = err.message || "Failed to place order";
+      const isInsufficient = msg.toLowerCase().includes("insufficient");
+      setSnack({ open: true, message: msg, severity: isInsufficient ? "warning" : "error" });
     }
   };
 
@@ -347,6 +362,23 @@ const PlaceOrder = () => {
                 pt: 1,
                 overflow: "hidden",
             }}>
+          {/* Wallet balance */}
+          {walletBalance !== null && (
+            <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.5, p: 1.2,
+              borderRadius: "10px", background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.2)" }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                <AccountBalanceWalletIcon sx={{ color: "#818cf8", fontSize: 18 }} />
+                <Typography sx={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>Available Balance</Typography>
+              </Box>
+              <Chip
+                label={`$${walletBalance.toFixed(2)}`}
+                size="small"
+                sx={{ background: walletBalance > 0 ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)",
+                  color: walletBalance > 0 ? "#22c55e" : "#ef4444", fontWeight: 700, fontSize: 13 }}
+              />
+            </Box>
+          )}
+
           <ToggleButtonGroup
             value={side}
             exclusive
@@ -488,6 +520,21 @@ const PlaceOrder = () => {
           </Button>
         </DialogContent>
       </Dialog>
+
+      <Snackbar
+        open={snack.open}
+        autoHideDuration={4000}
+        onClose={() => setSnack((s) => ({ ...s, open: false }))}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert
+          severity={snack.severity}
+          onClose={() => setSnack((s) => ({ ...s, open: false }))}
+          sx={{ fontWeight: 600, borderRadius: "10px", minWidth: 300 }}
+        >
+          {snack.message}
+        </Alert>
+      </Snackbar>
     </>
   );
 };

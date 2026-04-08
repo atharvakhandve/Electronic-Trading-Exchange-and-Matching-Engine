@@ -10,11 +10,13 @@ import CandleChart from "../components/Dashboard/CandleChart";
 import RSIPanel from "../components/Dashboard/RSIPanel";
 import DepthChart from "../components/Dashboard/DepthChart";
 import NewsSentiment from "../components/Dashboard/NewsSentiment";
+import Wallet from "../components/Dashboard/Wallet";
+import Portfolio from "../components/Dashboard/Portfolio";
 import useColors from "../theme/useColors.js";
 
 const ExchangeDashboard = () => {
   const [selectedMenu, setSelectedMenu] = useState("Dashboard");
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [candles, setCandles] = useState([]);
   const [bookData, setBookData] = useState({ bids: [], asks: [] });
   const [trades, setTrades] = useState([]);
@@ -56,8 +58,8 @@ const ExchangeDashboard = () => {
     return () => window.clearInterval(timer);
   }, [chartInterval]);
 
-  const handleDrawerToggle = () => setMobileOpen((prev) => !prev);
-  const handleMenuSelect = (menu) => { setSelectedMenu(menu); if (isMobile) setMobileOpen(false); };
+  const handleDrawerToggle = () => setSidebarOpen((prev) => !prev);
+  const handleMenuSelect = (menu) => { setSelectedMenu(menu); if (isMobile) setSidebarOpen(false); };
 
   const bids = [...(bookData.bids || [])].reverse();
   const asks = bookData.asks || [];
@@ -75,10 +77,22 @@ const ExchangeDashboard = () => {
       <TopBar appName="Trading Exchange" onMenuClick={handleDrawerToggle} />
 
       <Box sx={{ display: "flex", flex: 1, alignItems: "stretch" }}>
-        {!isMobile && <SidePanel selected={selectedMenu} onSelect={handleMenuSelect} />}
 
+        {/* Desktop: collapsible sidebar with slide transition */}
+        {!isMobile && (
+          <Box sx={{
+            width: sidebarOpen ? 280 : 0,
+            flexShrink: 0,
+            overflow: "hidden",
+            transition: "width 0.25s ease",
+          }}>
+            <SidePanel selected={selectedMenu} onSelect={handleMenuSelect} />
+          </Box>
+        )}
+
+        {/* Mobile: overlay drawer */}
         {isMobile && (
-          <Drawer anchor="left" open={mobileOpen} onClose={handleDrawerToggle}
+          <Drawer anchor="left" open={sidebarOpen} onClose={handleDrawerToggle}
             ModalProps={{ keepMounted: true }}
             PaperProps={{ sx: { width: 260, background: c.sideBg, color: c.t1, borderRight: `1px solid ${c.border}` } }}>
             <SidePanel selected={selectedMenu} onSelect={handleMenuSelect} />
@@ -326,6 +340,12 @@ const ExchangeDashboard = () => {
           {/* ── ORDERS ── */}
           {selectedMenu === "Orders" && <OrdersPage />}
 
+          {/* ── PORTFOLIO ── */}
+          {selectedMenu === "Portfolio" && <Portfolio />}
+
+          {/* ── WALLET ── */}
+          {selectedMenu === "Wallet" && <Wallet />}
+
           {/* ── LOGS ── */}
           {selectedMenu === "Logs" && (
             <Box>
@@ -367,11 +387,7 @@ const InlineOrderPanel = ({ bestBid, bestAsk }) => {
   const c = useColors();
 
   const showNotification = (message, severity = "success") => {
-    setNotification({
-      open: true,
-      message,
-      severity,
-    });
+    setNotification({ open: true, message, severity });
   };
 
   const handleCloseNotification = () => {
@@ -397,10 +413,6 @@ const InlineOrderPanel = ({ bestBid, bestAsk }) => {
           client_order_id: Date.now().toString(),
         }),
       });
-      if (!res.ok) throw new Error("failed");
-      alert(`${side} order placed!`);
-    } catch { alert("Order failed"); }
-    finally { setSubmitting(false); }
 
       const data = await res.json();
 
@@ -409,7 +421,6 @@ const InlineOrderPanel = ({ bestBid, bestAsk }) => {
           data?.detail?.includes("Not enough shares")
             ? "You don't have stocks to trade"
             : data?.detail || "Order failed";
-
         throw new Error(errorMessage);
       }
 
@@ -429,50 +440,6 @@ const InlineOrderPanel = ({ bestBid, bestAsk }) => {
       await Promise.all((data.orders || []).map((o) =>
         fetch(`http://localhost:8000/orders/${o.order_id}`, { method: "DELETE" })
       ));
-      alert("All active orders cancelled");
-    } catch { alert("Failed to cancel orders"); }
-  };
-
-  return (
-    <Box sx={{ background: c.cardBg, border: `1px solid ${c.border}`, borderRadius: "14px", boxShadow: c.shadow, p: 2 }}>
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1.5 }}>
-        <Typography sx={{ fontWeight: 700, fontSize: 16, color: c.t1 }}>Order Placement</Typography>
-        <Box onClick={cancelAll} sx={{ px: 1.4, py: 0.4, borderRadius: "6px", cursor: "pointer", fontSize: 11, fontWeight: 600,
-          border: "1px solid rgba(239,68,68,0.3)", color: "#ef4444",
-          "&:hover": { background: "rgba(239,68,68,0.08)" }, transition: "all 0.15s",
-        }}>Cancel All</Box>
-      </Box>
-
-      <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${c.border}`, borderRadius: "10px", overflow: "hidden", mb: 1.5 }}>
-        {["BUY", "SELL"].map((s) => (
-          <Box key={s} onClick={() => setSide(s)} sx={{
-            py: 1, textAlign: "center", cursor: "pointer", fontWeight: 700, fontSize: 14, userSelect: "none",
-            background: side === s ? (s === "BUY" ? "#16a34a" : "#dc2626") : "transparent",
-            color: side === s ? "#fff" : c.t3, transition: "all 0.15s",
-          }}>{s}</Box>
-        ))}
-      </Box>
-
-      <Box sx={{ display: "flex", gap: 0.6, mb: 1.5 }}>
-        {["LIMIT", "MARKET"].map((t) => (
-          <Box key={t} onClick={() => setOrderType(t)} sx={{
-            px: 1.5, py: 0.55, borderRadius: "7px", cursor: "pointer", fontSize: 12, fontWeight: 600, userSelect: "none",
-            background: orderType === t ? "rgba(99,102,241,0.2)" : "transparent",
-            color: orderType === t ? c.t1 : c.t3,
-            border: orderType === t ? `1px solid ${c.border}` : "1px solid transparent",
-            transition: "all 0.15s",
-          }}>{t}</Box>
-        ))}
-      </Box>
-
-      {orderType === "LIMIT" && (
-        <Box sx={{ mb: 1.5 }}>
-          <Typography sx={{ fontSize: 11, color: c.t3, mb: 0.6, textTransform: "uppercase", letterSpacing: 0.7 }}>Price</Typography>
-          <Box sx={{ position: "relative" }}>
-            <Typography sx={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: c.t2, fontSize: 15, pointerEvents: "none" }}>$</Typography>
-            <input type="number" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="0.00"
-              style={{ width: "100%", background: c.inputBg, border: `1px solid ${c.inputBdr}`, borderRadius: "9px",
-                padding: "10px 12px 10px 26px", color: c.inputClr, fontSize: "17px", fontWeight: 700, outline: "none", boxSizing: "border-box" }}
       showNotification("All active orders cancelled", "success");
     } catch {
       showNotification("Failed to cancel orders", "error");
@@ -481,61 +448,50 @@ const InlineOrderPanel = ({ bestBid, bestAsk }) => {
 
   return (
     <>
-      <Box sx={{ background: "#0f1728", border: "1px solid rgba(99,102,241,0.18)", borderRadius: "14px", p: 2 }}>
-        {/* Header */}
+      <Box sx={{ background: c.cardBg, border: `1px solid ${c.border}`, borderRadius: "14px", boxShadow: c.shadow, p: 2 }}>
         <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1.5 }}>
-          <Typography sx={{ fontWeight: 700, fontSize: 16 }}>Order Placement</Typography>
+          <Typography sx={{ fontWeight: 700, fontSize: 16, color: c.t1 }}>Order Placement</Typography>
           <Box onClick={cancelAll} sx={{ px: 1.4, py: 0.4, borderRadius: "6px", cursor: "pointer", fontSize: 11, fontWeight: 600,
             border: "1px solid rgba(239,68,68,0.3)", color: "#ef4444",
             "&:hover": { background: "rgba(239,68,68,0.08)" }, transition: "all 0.15s",
-          }}>
-            Cancel All
-          </Box>
+          }}>Cancel All</Box>
         </Box>
 
-        {/* Buy / Sell */}
-        <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: "1px solid rgba(99,102,241,0.18)", borderRadius: "10px", overflow: "hidden", mb: 1.5 }}>
+        <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${c.border}`, borderRadius: "10px", overflow: "hidden", mb: 1.5 }}>
           {["BUY", "SELL"].map((s) => (
             <Box key={s} onClick={() => setSide(s)} sx={{
               py: 1, textAlign: "center", cursor: "pointer", fontWeight: 700, fontSize: 14, userSelect: "none",
               background: side === s ? (s === "BUY" ? "#16a34a" : "#dc2626") : "transparent",
-              color: side === s ? "#fff" : "rgba(255,255,255,0.35)",
-              transition: "all 0.15s",
-            }}>
-              {s}
-            </Box>
+              color: side === s ? "#fff" : c.t3, transition: "all 0.15s",
+            }}>{s}</Box>
           ))}
         </Box>
 
-        {/* Order type tabs */}
         <Box sx={{ display: "flex", gap: 0.6, mb: 1.5 }}>
           {["LIMIT", "MARKET"].map((t) => (
             <Box key={t} onClick={() => setOrderType(t)} sx={{
               px: 1.5, py: 0.55, borderRadius: "7px", cursor: "pointer", fontSize: 12, fontWeight: 600, userSelect: "none",
               background: orderType === t ? "rgba(99,102,241,0.2)" : "transparent",
-              color: orderType === t ? "#fff" : "rgba(255,255,255,0.38)",
-              border: orderType === t ? "1px solid rgba(255,255,255,0.14)" : "1px solid transparent",
+              color: orderType === t ? c.t1 : c.t3,
+              border: orderType === t ? `1px solid ${c.border}` : "1px solid transparent",
               transition: "all 0.15s",
-            }}>
-              {t}
-            </Box>
+            }}>{t}</Box>
           ))}
         </Box>
 
-        {/* Price */}
         {orderType === "LIMIT" && (
           <Box sx={{ mb: 1.5 }}>
-            <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.4)", mb: 0.6, textTransform: "uppercase", letterSpacing: 0.7 }}>Price</Typography>
+            <Typography sx={{ fontSize: 11, color: c.t3, mb: 0.6, textTransform: "uppercase", letterSpacing: 0.7 }}>Price</Typography>
             <Box sx={{ position: "relative" }}>
-              <Typography sx={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.45)", fontSize: 15, pointerEvents: "none" }}>$</Typography>
+              <Typography sx={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: c.t2, fontSize: 15, pointerEvents: "none" }}>$</Typography>
               <input
                 type="number"
                 value={price}
                 onChange={(e) => setPrice(e.target.value)}
                 placeholder="0.00"
                 style={{
-                  width: "100%", background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)",
-                  borderRadius: "9px", padding: "10px 12px 10px 26px", color: "#fff", fontSize: "17px", fontWeight: 700,
+                  width: "100%", background: c.inputBg, border: `1px solid ${c.inputBdr}`,
+                  borderRadius: "9px", padding: "10px 12px 10px 26px", color: c.inputClr, fontSize: "17px", fontWeight: 700,
                   outline: "none", boxSizing: "border-box",
                 }}
               />
@@ -548,73 +504,31 @@ const InlineOrderPanel = ({ bestBid, bestAsk }) => {
           </Box>
         )}
 
-        {/* Amount */}
         <Box sx={{ mb: 1.5 }}>
-          <Typography sx={{ fontSize: 11, color: "rgba(255,255,255,0.4)", mb: 0.6, textTransform: "uppercase", letterSpacing: 0.7 }}>Amount</Typography>
-          <Box sx={{ display: "flex", alignItems: "center", background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: "9px", overflow: "hidden" }}>
-            <input
-              type="number"
-              value={qty}
-              onChange={(e) => setQty(e.target.value)}
-              style={{ flex: 1, background: "transparent", border: "none", padding: "10px 12px", color: "#fff", fontSize: "17px", fontWeight: 700, outline: "none" }}
+          <Typography sx={{ fontSize: 11, color: c.t3, mb: 0.6, textTransform: "uppercase", letterSpacing: 0.7 }}>Amount</Typography>
+          <Box sx={{ display: "flex", alignItems: "center", background: c.inputBg, border: `1px solid ${c.inputBdr}`, borderRadius: "9px", overflow: "hidden" }}>
+            <input type="number" value={qty} onChange={(e) => setQty(e.target.value)}
+              style={{ flex: 1, background: "transparent", border: "none", padding: "10px 12px", color: c.inputClr, fontSize: "17px", fontWeight: 700, outline: "none" }}
             />
-            <Typography sx={{ px: 1.5, fontSize: 12, color: "rgba(255,255,255,0.35)", borderLeft: "1px solid rgba(99,102,241,0.18)", py: 1.3 }}>shares</Typography>
+            <Typography sx={{ px: 1.5, fontSize: 12, color: c.t3, borderLeft: `1px solid ${c.border}`, py: 1.3 }}>shares</Typography>
           </Box>
           <Box sx={{ display: "flex", gap: 0.6, mt: 0.8 }}>
             {[1, 5, 10, 50, 100].map((n) => (
               <Box key={n} onClick={() => setQty(String(n))} sx={{
                 flex: 1, textAlign: "center", py: 0.55, cursor: "pointer", fontSize: 11, fontWeight: 600,
-                borderRadius: "6px", border: "1px solid rgba(255,255,255,0.09)", color: "rgba(255,255,255,0.45)",
-                "&:hover": { border: "1px solid rgba(255,255,255,0.22)", color: "#fff", background: "rgba(99,102,241,0.06)" },
+                borderRadius: "6px", border: `1px solid ${c.border}`, color: c.t3,
+                "&:hover": { border: `1px solid rgba(99,102,241,0.5)`, color: c.t1, background: "rgba(99,102,241,0.06)" },
                 transition: "all 0.15s", userSelect: "none",
-              }}>
-                {n}
-              </Box>
+              }}>{n}</Box>
             ))}
           </Box>
         </Box>
-      )}
 
-      <Box sx={{ mb: 1.5 }}>
-        <Typography sx={{ fontSize: 11, color: c.t3, mb: 0.6, textTransform: "uppercase", letterSpacing: 0.7 }}>Amount</Typography>
-        <Box sx={{ display: "flex", alignItems: "center", background: c.inputBg, border: `1px solid ${c.inputBdr}`, borderRadius: "9px", overflow: "hidden" }}>
-          <input type="number" value={qty} onChange={(e) => setQty(e.target.value)}
-            style={{ flex: 1, background: "transparent", border: "none", padding: "10px 12px", color: c.inputClr, fontSize: "17px", fontWeight: 700, outline: "none" }}
-          />
-          <Typography sx={{ px: 1.5, fontSize: 12, color: c.t3, borderLeft: `1px solid ${c.border}`, py: 1.3 }}>shares</Typography>
-        </Box>
-        <Box sx={{ display: "flex", gap: 0.6, mt: 0.8 }}>
-          {[1, 5, 10, 50, 100].map((n) => (
-            <Box key={n} onClick={() => setQty(String(n))} sx={{
-              flex: 1, textAlign: "center", py: 0.55, cursor: "pointer", fontSize: 11, fontWeight: 600,
-              borderRadius: "6px", border: `1px solid ${c.border}`, color: c.t3,
-              "&:hover": { border: `1px solid rgba(99,102,241,0.5)`, color: c.t1, background: "rgba(99,102,241,0.06)" },
-              transition: "all 0.15s", userSelect: "none",
-            }}>{n}</Box>
-          ))}
-
-        {/* Estimated cost */}
-        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", py: 1.2, borderTop: "1px solid rgba(99,102,241,0.18)", mb: 1.5 }}>
-          <Typography sx={{ color: "rgba(255,255,255,0.5)", fontSize: 13 }}>Estimated Cost</Typography>
-          <Typography sx={{ fontWeight: 700, fontSize: 16 }}>${estimatedTotal}</Typography>
+        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", py: 1.2, borderTop: `1px solid ${c.border}`, mb: 1.5 }}>
+          <Typography sx={{ color: c.t2, fontSize: 13 }}>Estimated Cost</Typography>
+          <Typography sx={{ fontWeight: 700, fontSize: 16, color: c.t1 }}>${estimatedTotal}</Typography>
         </Box>
 
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", py: 1.2, borderTop: `1px solid ${c.border}`, mb: 1.5 }}>
-        <Typography sx={{ color: c.t2, fontSize: 13 }}>Estimated Cost</Typography>
-        <Typography sx={{ fontWeight: 700, fontSize: 16, color: c.t1 }}>${estimatedTotal}</Typography>
-      </Box>
-
-      <Box onClick={!submitting ? handleSubmit : undefined} sx={{
-        py: 1.3, textAlign: "center", borderRadius: "10px", cursor: submitting ? "default" : "pointer",
-        background: side === "BUY" ? "linear-gradient(135deg,#16a34a,#15803d)" : "linear-gradient(135deg,#dc2626,#b91c1c)",
-        color: "#fff", fontWeight: 700, fontSize: 15, userSelect: "none",
-        opacity: submitting ? 0.7 : 1,
-        "&:hover": { filter: submitting ? "none" : "brightness(1.08)" }, transition: "all 0.15s",
-      }}>
-        {submitting ? "Placing..." : `Place ${side} Order`}
-      </Box>
-    </Box>
-        {/* Submit */}
         <Box onClick={!submitting ? handleSubmit : undefined} sx={{
           py: 1.3, textAlign: "center", borderRadius: "10px",
           cursor: submitting ? "default" : "pointer",
@@ -640,11 +554,7 @@ const InlineOrderPanel = ({ bestBid, bestAsk }) => {
           onClose={handleCloseNotification}
           severity={notification.severity}
           variant="filled"
-          sx={{
-            width: "100%",
-            fontWeight: 600,
-            borderRadius: "10px",
-          }}
+          sx={{ width: "100%", fontWeight: 600, borderRadius: "10px" }}
         >
           {notification.message}
         </Alert>

@@ -93,7 +93,7 @@ def init_db():
             provider VARCHAR(50),
             last4 VARCHAR(4),
             bank_name VARCHAR(100),
-            account_mask VARCHAR(10),
+            account_mask VARCHAR(30),
             is_default BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
