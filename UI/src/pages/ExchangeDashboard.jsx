@@ -15,7 +15,7 @@ import Portfolio from "../components/Dashboard/Portfolio";
 import useColors from "../theme/useColors.js";
 
 const ExchangeDashboard = () => {
-  const [selectedMenu, setSelectedMenu] = useState("Dashboard");
+  const [selectedMenu, setSelectedMenu] = useState("Trading Board");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [candles, setCandles] = useState([]);
   const [bookData, setBookData] = useState({ bids: [], asks: [] });
@@ -102,7 +102,7 @@ const ExchangeDashboard = () => {
         <Box sx={{ flex: 1, p: { xs: 2, md: 3 }, color: c.t1, background: c.pageBg, minWidth: 0, overflowY: "auto" }}>
 
           {/* ── DASHBOARD ── */}
-          {selectedMenu === "Dashboard" && (
+          {selectedMenu === "Trading Board" && (
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", xl: "1fr 340px" }, gap: 2, alignItems: "start" }}>
 
               {/* LEFT COLUMN */}
