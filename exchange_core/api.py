@@ -2,20 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
+from dotenv import load_dotenv
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, APIRouter, Query
 from fastapi.middleware.cors import CORSMiddleware
-from docker import repository 
+from docker import repository
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from docker.db import get_connection
+from docker.db import get_connection, put_connection
 
 from engine import Sequencer, MatchingEngineService, Command
 from publisher import WebSocketPublisher, event_fanout_loop
 from models import Order, Side, OrderType, now_ms
-from docker.repository import insert_command
+from docker.repository import insert_command, get_user_holdings, get_holding_quantity
 
 sequencer = Sequencer()
 engine = MatchingEngineService(symbol="AAPL")
@@ -49,6 +57,8 @@ app.add_middleware(
         "http://127.0.0.1:8000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
         "null"
     ],
     allow_credentials=True,
@@ -71,58 +81,6 @@ async def health():
     return {"status": "ok", "seq_applied": engine.seq_applied}
 
 
-@app.post("/orders")
-async def create_order(req: CreateOrderRequest):
-    if req.symbol != "AAPL":
-        raise HTTPException(status_code=400, detail="Only AAPL supported in MVP")
-
-    existing = sequencer.get_idempotent_result(req.user_id, req.client_order_id)
-    if existing:
-        return existing
-
-    try:
-        order = Order(
-            user_id=req.user_id,
-            symbol=req.symbol,
-            side=req.side,
-            type=req.type,
-            qty=req.qty,
-            price_cents=req.price_cents,
-            client_order_id=req.client_order_id,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    seq = await sequencer.next_seq()
-
-    payload = {
-        "order_id": order.order_id,
-        "client_order_id": order.client_order_id,
-        "user_id": order.user_id,
-        "symbol": order.symbol,
-        "side": order.side.value,
-        "type": order.type.value,
-        "qty": order.qty,
-        "price_cents": order.price_cents,
-        "created_ms": order.created_ms
-    }
-
-    insert_command(seq, "NEW_ORDER", payload, order.created_ms)
-
-    cmd = Command(seq=seq, type="NEW_ORDER", payload={"order": order})
-    await engine.submit(cmd)
-
-    result = {
-        "message": "order accepted for processing",
-        "seq": seq,
-        "order_id": order.order_id,
-        "client_order_id": order.client_order_id,
-    }
-
-    sequencer.save_idempotent_result(req.user_id, req.client_order_id, result)
-    return result
-
-
 @app.delete("/orders/{order_id}")
 async def cancel_order(order_id: str):
     seq = await sequencer.next_seq()
@@ -131,7 +89,9 @@ async def cancel_order(order_id: str):
         "order_id": order_id
     }
 
-    insert_command(seq, "CANCEL_ORDER", payload, now_ms())
+    ts = now_ms()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: insert_command(seq, "CANCEL_ORDER", payload, ts))
 
     cmd = Command(seq=seq, type="CANCEL_ORDER", payload={"order_id": order_id})
     await engine.submit(cmd)
@@ -184,39 +144,86 @@ async def get_order(order_id: str):
     }
 
 
-@app.get("/orders")
-async def list_orders(user_id: Optional[str] = None, status: Optional[str] = None, limit: int = 50):
-    orders = list(engine.orders.values())
+@app.post("/orders")
+async def create_order(req: CreateOrderRequest):
+    if req.symbol != "AAPL":
+        raise HTTPException(status_code=400, detail="Only AAPL supported in MVP")
 
-    if user_id is not None:
-        orders = [o for o in orders if o.user_id == user_id]
+    # block SELL if user does not own enough shares
+    if req.side.value == "SELL":
+        owned_qty = get_holding_quantity(req.user_id, req.symbol)
 
-    if status is not None:
-        status_upper = status.upper()
-        orders = [o for o in orders if o.status.value == status_upper]
+        if owned_qty < req.qty:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough shares to sell. Owned: {owned_qty}, Trying to sell: {req.qty}"
+            )
 
-    orders = sorted(orders, key=lambda o: o.created_ms, reverse=True)[:limit]
+    # block BUY if wallet balance is insufficient
+    if req.side.value == "BUY":
+        if req.type.value == "LIMIT" and req.price_cents:
+            required_cents = req.qty * req.price_cents
+        else:
+            # MARKET order — estimate from best ask
+            snap = engine.book.snapshot_l2(1)
+            best_ask_cents = snap["asks"][0][0] if snap.get("asks") else 0
+            required_cents = req.qty * best_ask_cents if best_ask_cents else 0
 
-    return {
-        "orders": [
-            {
-                "order_id": o.order_id,
-                "client_order_id": o.client_order_id,
-                "user_id": o.user_id,
-                "symbol": o.symbol,
-                "side": o.side.value,
-                "type": o.type.value,
-                "qty": o.qty,
-                "remaining_qty": o.remaining_qty,
-                "price_cents": o.price_cents,
-                "status": o.status.value,
-                "reject_reason": o.reject_reason,
-                "created_ms": o.created_ms,
-            }
-            for o in orders
-        ]
+        if required_cents > 0:
+            wallet = repository.get_wallet(int(req.user_id))
+            balance = wallet["balance_cents"]
+            if balance < required_cents:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient funds: need ${required_cents/100:.2f}, available ${balance/100:.2f}"
+                )
+
+    existing = sequencer.get_idempotent_result(req.user_id, req.client_order_id)
+    if existing:
+        return existing
+
+    try:
+        order = Order(
+            user_id=req.user_id,
+            symbol=req.symbol,
+            side=req.side,
+            type=req.type,
+            qty=req.qty,
+            price_cents=req.price_cents,
+            client_order_id=req.client_order_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    seq = await sequencer.next_seq()
+
+    payload = {
+        "order_id": order.order_id,
+        "client_order_id": order.client_order_id,
+        "user_id": order.user_id,
+        "symbol": order.symbol,
+        "side": order.side.value,
+        "type": order.type.value,
+        "qty": order.qty,
+        "price_cents": order.price_cents,
+        "created_ms": order.created_ms
     }
 
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: insert_command(seq, "NEW_ORDER", payload, order.created_ms))
+
+    cmd = Command(seq=seq, type="NEW_ORDER", payload={"order": order})
+    await engine.submit(cmd)
+
+    result = {
+        "message": "order accepted for processing",
+        "seq": seq,
+        "order_id": order.order_id,
+        "client_order_id": order.client_order_id,
+    }
+
+    sequencer.save_idempotent_result(req.user_id, req.client_order_id, result)
+    return result
 
 @app.websocket("/stream")
 async def stream(ws: WebSocket):
@@ -357,6 +364,9 @@ def get_users():
         ]
     }
 
+@app.get("/holdings/{user_id}")
+def fetch_holdings(user_id: str):
+    return get_user_holdings(user_id)
 
 @app.get("/candles")
 def get_candles(
@@ -364,14 +374,11 @@ def get_candles(
     interval: str = Query("1m"),
     limit: int = Query(100)
 ):
-    if interval == "1m":
-        bucket_size = 60000
-    elif interval == "5m":
-        bucket_size = 300000
-    elif interval == "15m":
-        bucket_size = 900000
-    else:
-        bucket_size = 60000
+    import time as _time
+    bucket_map = {"1m": 60000, "5m": 300000, "15m": 900000, "30m": 1800000, "1h": 3600000}
+    bucket_size = bucket_map.get(interval, 60000)
+    # Look back far enough to cover `limit` candles plus a small buffer
+    cutoff_ms = int(_time.time() * 1000) - bucket_size * (limit + 10)
 
     conn = get_connection()
     cur = conn.cursor()
@@ -380,9 +387,8 @@ def get_candles(
         WITH recent_trades AS (
             SELECT *
             FROM trades
-            WHERE symbol = %s
-            ORDER BY ts_ms DESC
-            LIMIT 5000
+            WHERE symbol = %s AND ts_ms >= %s
+            ORDER BY ts_ms ASC
         ),
         bucketed AS (
             SELECT
@@ -393,6 +399,19 @@ def get_candles(
                 floor(ts_ms::numeric / {bucket_size}) * {bucket_size} AS bucket_ms
             FROM recent_trades
         ),
+        bucket_median AS (
+            SELECT
+                bucket_ms,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY price_cents) AS median_price
+            FROM bucketed
+            GROUP BY bucket_ms
+        ),
+        filtered AS (
+            SELECT b.*
+            FROM bucketed b
+            JOIN bucket_median m ON b.bucket_ms = m.bucket_ms
+            WHERE b.price_cents BETWEEN m.median_price * 0.95 AND m.median_price * 1.05
+        ),
         ranked AS (
             SELECT
                 bucket_ms,
@@ -400,14 +419,15 @@ def get_candles(
                 ts_ms,
                 ROW_NUMBER() OVER (PARTITION BY bucket_ms ORDER BY ts_ms ASC) AS rn_open,
                 ROW_NUMBER() OVER (PARTITION BY bucket_ms ORDER BY ts_ms DESC) AS rn_close
-            FROM bucketed
+            FROM filtered
         ),
         agg AS (
             SELECT
                 bucket_ms,
                 MAX(price_cents) AS high,
-                MIN(price_cents) AS low
-            FROM bucketed
+                MIN(price_cents) AS low,
+                SUM(qty) AS volume
+            FROM filtered
             GROUP BY bucket_ms
         ),
         open_prices AS (
@@ -425,7 +445,8 @@ def get_candles(
             o.open,
             a.high,
             a.low,
-            c.close
+            c.close,
+            a.volume
         FROM agg a
         JOIN open_prices o ON a.bucket_ms = o.bucket_ms
         JOIN close_prices c ON a.bucket_ms = c.bucket_ms
@@ -433,11 +454,11 @@ def get_candles(
         LIMIT %s
     """
 
-    cur.execute(query, (symbol, limit))
+    cur.execute(query, (symbol, cutoff_ms, limit))
     rows = cur.fetchall()
 
     cur.close()
-    conn.close()
+    put_connection(conn)
 
     rows.reverse()
 
@@ -448,6 +469,237 @@ def get_candles(
             "high": float(row[2]) / 100,
             "low": float(row[3]) / 100,
             "close": float(row[4]) / 100,
+            "volume": int(row[5]),
         }
         for row in rows
     ]
+
+
+# ── News + Sentiment (FinBERT via HuggingFace Inference API) ─────────────────
+
+_news_cache: dict = {}   # symbol -> {"data": ..., "ts": float}
+_NEWS_TTL = 300          # 5 minutes
+
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
+HF_API_KEY = os.getenv("HF_API_KEY", "")
+
+# Bullish / bearish keyword sets for financial VADER boosting
+_BULLISH_WORDS = {
+    "surge", "surges", "surged", "rally", "rallies", "rallied", "gain", "gains",
+    "gained", "rise", "rises", "rose", "soar", "soars", "soared", "beat", "beats",
+    "record", "high", "upgrade", "upgrades", "upgraded", "buy", "outperform",
+    "profit", "profits", "growth", "revenue", "breakthrough", "positive", "strong",
+    "bullish", "boom", "booming", "expand", "expands", "expansion",
+}
+_BEARISH_WORDS = {
+    "drop", "drops", "dropped", "fall", "falls", "fell", "decline", "declines",
+    "declined", "plunge", "plunges", "plunged", "loss", "losses", "miss", "misses",
+    "missed", "cut", "cuts", "downgrade", "downgrades", "downgraded", "sell",
+    "underperform", "weak", "warning", "lawsuit", "recall", "bearish", "crash",
+    "crashes", "crashed", "slump", "slumps", "slumped", "layoff", "layoffs",
+    "fine", "penalty", "investigation", "risk", "debt", "bankrupt",
+}
+
+
+def _vader_sentiment(headline: str) -> tuple[str, float]:
+    """Score a headline with VADER + financial keyword boost."""
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+    analyzer = SentimentIntensityAnalyzer()
+
+    scores = analyzer.polarity_scores(headline)
+    compound = scores["compound"]
+
+    # Financial keyword boost: shift compound score by ±0.15 per matched word
+    words = set(headline.lower().split())
+    bull_hits = len(words & _BULLISH_WORDS)
+    bear_hits = len(words & _BEARISH_WORDS)
+    compound = max(-1.0, min(1.0, compound + 0.15 * bull_hits - 0.15 * bear_hits))
+
+    if compound >= 0.05:
+        label, confidence = "bullish", round((compound + 1) / 2, 3)
+    elif compound <= -0.05:
+        label, confidence = "bearish", round((1 - compound) / 2, 3)
+    else:
+        label, confidence = "neutral", round(1 - abs(compound) * 10, 3)
+
+    return label, max(0.5, confidence)
+
+
+def _majority_sentiment(labels: list[str]) -> tuple[str, float]:
+    counts = {"bullish": 0, "neutral": 0, "bearish": 0}
+    for lbl in labels:
+        counts[lbl] = counts.get(lbl, 0) + 1
+    total = len(labels) or 1
+    overall = max(counts, key=counts.__getitem__)
+    return overall, round(counts[overall] / total, 3)
+
+
+@app.get("/news/{symbol}")
+async def get_news_sentiment(symbol: str):
+    symbol = symbol.upper()
+
+    cached = _news_cache.get(symbol)
+    if cached and (time.time() - cached["ts"]) < _NEWS_TTL:
+        return cached["data"]
+
+    if not NEWSAPI_KEY:
+        raise HTTPException(status_code=503, detail="NEWSAPI_KEY not configured")
+
+    # 1. Fetch headlines
+    async with httpx.AsyncClient(timeout=15) as client:
+        news_resp = await client.get(
+            "https://newsapi.org/v2/everything",
+            params={
+                "q": symbol,
+                "language": "en",
+                "sortBy": "publishedAt",
+                "pageSize": 10,
+                "apiKey": NEWSAPI_KEY,
+            },
+        )
+
+    if news_resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"NewsAPI error: {news_resp.text}")
+
+    articles_raw = news_resp.json().get("articles", [])
+    articles = [
+        {
+            "title": a.get("title", ""),
+            "source": a.get("source", {}).get("name", ""),
+            "url": a.get("url", ""),
+            "published_at": a.get("publishedAt", ""),
+        }
+        for a in articles_raw
+        if a.get("title") and "[Removed]" not in a.get("title", "")
+    ][:10]
+
+    if not articles:
+        result = {"symbol": symbol, "articles": [], "sentiment": None}
+        _news_cache[symbol] = {"data": result, "ts": time.time()}
+        return result
+
+    # 2. Score each headline locally with VADER
+    per_labels = []
+    for article in articles:
+        label, confidence = _vader_sentiment(article["title"])
+        article["sentiment"] = label
+        article["sentiment_confidence"] = confidence
+        per_labels.append(label)
+
+    # 3. Aggregate
+    overall, overall_confidence = _majority_sentiment(per_labels)
+    bull = per_labels.count("bullish")
+    bear = per_labels.count("bearish")
+    neut = per_labels.count("neutral")
+    total = len(articles)
+
+    # Build a brief analyst-style summary from the scored headlines
+    bullish_titles  = [a["title"] for a, l in zip(articles, per_labels) if l == "bullish"]
+    bearish_titles  = [a["title"] for a, l in zip(articles, per_labels) if l == "bearish"]
+
+    if overall == "bullish":
+        tone = "positive"
+        direction = f"Sentiment is leaning bullish ({bull}/{total} headlines positive)."
+    elif overall == "bearish":
+        tone = "negative"
+        direction = f"Sentiment is leaning bearish ({bear}/{total} headlines negative)."
+    else:
+        tone = "mixed"
+        direction = f"Sentiment is largely neutral ({neut}/{total} headlines neutral)."
+
+    highlights = []
+    if bullish_titles:
+        # Truncate headline to keep the summary readable
+        h = bullish_titles[0][:80] + ("…" if len(bullish_titles[0]) > 80 else "")
+        highlights.append(f"Bullish signal: \"{h}\"")
+    if bearish_titles:
+        h = bearish_titles[0][:80] + ("…" if len(bearish_titles[0]) > 80 else "")
+        highlights.append(f"Bearish signal: \"{h}\"")
+
+    summary = f"{direction} " + " ".join(highlights)
+    if not highlights:
+        summary += f" No strongly directional headlines detected for {symbol}."
+
+    result = {
+        "symbol": symbol,
+        "articles": articles,
+        "sentiment": {
+            "overall": overall,
+            "confidence": overall_confidence,
+            "summary": summary.strip(),
+            "counts": {"bullish": bull, "bearish": bear, "neutral": neut},
+        },
+    }
+
+    _news_cache[symbol] = {"data": result, "ts": time.time()}
+    return result
+
+
+# ── Wallet endpoints ──────────────────────────────────────────────────────────
+
+class DepositRequest(BaseModel):
+    amount_cents: int = Field(gt=0)
+    reference: Optional[str] = None
+
+class WithdrawRequest(BaseModel):
+    amount_cents: int = Field(gt=0)
+    reference: Optional[str] = None
+
+class AddPaymentMethodRequest(BaseModel):
+    method_type: str
+    provider: Optional[str] = None
+    last4: Optional[str] = None
+    bank_name: Optional[str] = None
+    account_mask: Optional[str] = None
+
+
+@app.get("/wallet/{user_id}")
+def get_wallet(user_id: int):
+    return repository.get_wallet(user_id)
+
+
+@app.post("/wallet/{user_id}/deposit")
+def deposit(user_id: int, req: DepositRequest):
+    return repository.wallet_deposit(user_id, req.amount_cents, req.reference)
+
+
+@app.post("/wallet/{user_id}/withdraw")
+def withdraw(user_id: int, req: WithdrawRequest):
+    result = repository.wallet_withdraw(user_id, req.amount_cents, req.reference)
+    if result is None:
+        raise HTTPException(status_code=400, detail="Insufficient funds")
+    return result
+
+
+@app.get("/wallet/{user_id}/transactions")
+def get_transactions(user_id: int, limit: int = 50):
+    return repository.get_wallet_transactions(user_id, limit)
+
+
+@app.get("/wallet/{user_id}/payment-methods")
+def list_payment_methods(user_id: int):
+    return repository.get_payment_methods(user_id)
+
+
+@app.post("/wallet/{user_id}/payment-methods")
+def add_payment_method(user_id: int, req: AddPaymentMethodRequest):
+    return repository.add_payment_method(
+        user_id, req.method_type, req.provider,
+        req.last4, req.bank_name, req.account_mask
+    )
+
+
+@app.delete("/wallet/{user_id}/payment-methods/{pm_id}")
+def remove_payment_method(user_id: int, pm_id: int):
+    deleted = repository.delete_payment_method(user_id, pm_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Payment method not found")
+    return {"message": "deleted"}
+
+
+@app.patch("/wallet/{user_id}/payment-methods/{pm_id}/default")
+def set_default(user_id: int, pm_id: int):
+    ok = repository.set_default_payment_method(user_id, pm_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Payment method not found")
+    return {"message": "default updated"}

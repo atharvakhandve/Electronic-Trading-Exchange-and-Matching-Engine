@@ -3,3 +3,6 @@ uvicorn
 pydantic
 websockets
 psycopg2-binary
+httpx
+python-dotenv
+vaderSentiment
