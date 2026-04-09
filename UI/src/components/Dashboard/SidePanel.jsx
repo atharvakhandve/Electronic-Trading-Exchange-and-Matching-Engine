@@ -15,6 +15,7 @@ import useColors from "../../theme/useColors.js";
 const menuItems = [
   { label: "Portfolio",   icon: <PieChartOutlineOutlinedIcon /> },
   { label: "Trading Board", icon: <DashboardOutlinedIcon /> },
+  { label: "Orders",        icon: <MenuBookOutlinedIcon /> },
   { label: "Wallet",      icon: <AccountBalanceWalletOutlinedIcon /> },
   { label: "Logs",        icon: <TerminalOutlinedIcon /> },
 ];
