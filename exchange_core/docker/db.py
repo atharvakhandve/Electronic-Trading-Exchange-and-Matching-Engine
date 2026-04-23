@@ -5,12 +5,12 @@ import os
 
 _DB_WORKERS = 40
 
-DATABSE_URL = os.getenv("DATABSE_URL")
-if DATABSE_URL:
+DATABASE_URL = os.getenv("DATABSE_URL")
+if DATABASE_URL:
     _pool = pool.ThreadedConnectionPool(
         minconn=2,
         maxconn=_DB_WORKERS + 5,  # slight headroom above worker count
-        dsn=DATABSE_URL,
+        dsn=DATABASE_URL,
     )
 
 _pool = pool.ThreadedConnectionPool(
