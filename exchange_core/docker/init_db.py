@@ -1,4 +1,7 @@
-from db import get_connection
+try:
+    from docker.db import get_connection
+except ImportError:
+    from db import get_connection
 
 
 def init_db():
@@ -101,7 +104,6 @@ def init_db():
 
     conn.commit()
     cur.close()
-    conn.close()
     print("Tables created successfully.")
     
 if __name__ == "__main__":
