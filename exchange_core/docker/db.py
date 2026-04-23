@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from psycopg2 import pool
 import os
 
-_DB_WORKERS = 40
+_DB_WORKERS = 10
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL:
