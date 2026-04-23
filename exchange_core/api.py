@@ -33,6 +33,9 @@ publisher = WebSocketPublisher()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from docker.init_db import init_db
+    init_db()
+
     # Replay state before starting live processing
     await engine.replay_from_db()
     sequencer.set_seq(engine.seq_applied)
