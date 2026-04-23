@@ -42,7 +42,11 @@ export default function LoginForm() {
 
     try {
       const result = await loginUser(formData);
-      console.log("Login successful:", result);
+
+      if (result.error) {
+        setError(result.error);
+        return;
+      }
 
       localStorage.setItem("user", JSON.stringify(result));
       localStorage.setItem("user_id", result.user_id);

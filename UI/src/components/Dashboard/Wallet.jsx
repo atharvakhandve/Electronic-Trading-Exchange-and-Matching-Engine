@@ -253,6 +253,7 @@ const Wallet = () => {
     load();
     // Auto-refresh every 5s so trade debits show up without manual navigation
     const timer = setInterval(() => {
+      if (!userId) return;
       getWallet(userId).then((w) => setWallet(w)).catch(() => {});
       getTransactions(userId, 20).then((t) => setTransactions(t)).catch(() => {});
     }, 5000);

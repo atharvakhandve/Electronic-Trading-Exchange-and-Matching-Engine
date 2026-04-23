@@ -20,6 +20,7 @@ from docker import repository
 from pydantic import BaseModel, Field
 from docker.db import get_connection, put_connection
 
+from docker.db import DB_EXECUTOR
 from engine import Sequencer, MatchingEngineService, Command
 from publisher import WebSocketPublisher, event_fanout_loop
 from models import Order, Side, OrderType, now_ms
@@ -103,8 +104,8 @@ async def cancel_order(order_id: str):
     }
 
     ts = now_ms()
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lambda: insert_command(seq, "CANCEL_ORDER", payload, ts))
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(DB_EXECUTOR, lambda: insert_command(seq, "CANCEL_ORDER", payload, ts))
 
     cmd = Command(seq=seq, type="CANCEL_ORDER", payload={"order_id": order_id})
     await engine.submit(cmd)
@@ -222,8 +223,8 @@ async def create_order(req: CreateOrderRequest):
         "created_ms": order.created_ms
     }
 
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lambda: insert_command(seq, "NEW_ORDER", payload, order.created_ms))
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(DB_EXECUTOR, lambda: insert_command(seq, "NEW_ORDER", payload, order.created_ms))
 
     cmd = Command(seq=seq, type="NEW_ORDER", payload={"order": order})
     await engine.submit(cmd)

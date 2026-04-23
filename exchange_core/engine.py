@@ -10,6 +10,7 @@ log = logging.getLogger(__name__)
 from models import Order, Side, OrderType
 from matcher import match_order
 from orderbook import OrderBook
+from docker.db import DB_EXECUTOR
 from docker.repository import (
     insert_order,
     update_order,
@@ -133,12 +134,12 @@ class MatchingEngineService:
         self.is_replaying = False
 
     async def _handle_new_order(self, cmd: Command) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         order: Order = cmd.payload["order"]
         self.orders[order.order_id] = order
 
         if not self.is_replaying:
-            await loop.run_in_executor(None, insert_order, order)
+            await loop.run_in_executor(DB_EXECUTOR, insert_order, order)
 
         if not self.is_replaying:
             await self.event_queue.put({
@@ -153,7 +154,7 @@ class MatchingEngineService:
         trades = match_order(self.book, order)
 
         if not self.is_replaying:
-            await loop.run_in_executor(None, update_order, order)
+            await loop.run_in_executor(DB_EXECUTOR, update_order, order)
 
         if not self.is_replaying:
             await self.event_queue.put({
@@ -169,7 +170,7 @@ class MatchingEngineService:
 
         for t in trades:
             if not self.is_replaying:
-                await loop.run_in_executor(None, insert_trade, t)
+                await loop.run_in_executor(DB_EXECUTOR, insert_trade, t)
 
             maker = self.orders.get(t.maker_order_id)
             taker = self.orders.get(t.taker_order_id)
@@ -182,22 +183,28 @@ class MatchingEngineService:
                     buyer = taker
                     seller = maker
 
-                await loop.run_in_executor(
-                    None,
-                    update_holding_after_buy,
-                    buyer.user_id,
-                    t.symbol,
-                    t.qty,
-                    t.price_cents / 100
-                )
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        update_holding_after_buy,
+                        buyer.user_id,
+                        t.symbol,
+                        t.qty,
+                        t.price_cents / 100
+                    )
+                except Exception as e:
+                    log.error("HOLDINGS buy update FAILED user=%s error=%s", buyer.user_id, e)
 
-                await loop.run_in_executor(
-                    None,
-                    update_holding_after_sell,
-                    seller.user_id,
-                    t.symbol,
-                    t.qty
-                )
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        update_holding_after_sell,
+                        seller.user_id,
+                        t.symbol,
+                        t.qty
+                    )
+                except Exception as e:
+                    log.error("HOLDINGS sell update FAILED user=%s error=%s", seller.user_id, e)
 
                 trade_value_cents = t.qty * t.price_cents
                 ref = f"trade:{t.trade_id}"
@@ -238,7 +245,7 @@ class MatchingEngineService:
                 await self.event_queue.put(trade_event)
 
             if maker and not self.is_replaying:
-                await loop.run_in_executor(None, update_order, maker)
+                await loop.run_in_executor(DB_EXECUTOR, update_order, maker)
                 await self.event_queue.put({
                     "type": "OrderUpdate",
                     "seq": cmd.seq,
@@ -251,7 +258,7 @@ class MatchingEngineService:
                 })
 
             if taker and not self.is_replaying:
-                await loop.run_in_executor(None, update_order, taker)
+                await loop.run_in_executor(DB_EXECUTOR, update_order, taker)
                 await self.event_queue.put({
                     "type": "OrderUpdate",
                     "seq": cmd.seq,
@@ -268,7 +275,7 @@ class MatchingEngineService:
             await self.event_queue.put(self._book_snapshot_event(cmd.seq))
 
     async def _handle_cancel_order(self, cmd: Command) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         order_id = cmd.payload["order_id"]
         order = self.orders.get(order_id)
 
@@ -277,7 +284,7 @@ class MatchingEngineService:
         if ok:
             status = "CANCELED"
             if order and not self.is_replaying:
-                await loop.run_in_executor(None, update_order, order)
+                await loop.run_in_executor(DB_EXECUTOR, update_order, order)
             user_id = order.user_id if order else None
             symbol = order.symbol if order else self.book.symbol
         else:
