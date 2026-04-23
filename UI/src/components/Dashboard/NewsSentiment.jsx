@@ -62,7 +62,8 @@ const NewsSentiment = ({ symbol = "AAPL" }) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8000/news/${symbol}`);
+      const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+      const res = await fetch(`${API_URL}/news/${symbol}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail || `HTTP ${res.status}`);
